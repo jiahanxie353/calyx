@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8">
+        <meta name="author" content="The Calyx Authors">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <link rel="icon" href="https://calyxir.org/img/logo.svg" type="image/svg+xml">
+        <title>Calyx Playground</title>
+
+        <!-- CSS -->
+        <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
+      <script type="module" crossorigin src="./assets/index-BlT_H0Cf.js"></script>
+      <link rel="stylesheet" crossorigin href="./assets/index-C20PwY-R.css">
+    </head>
+    <body>
+        <div id="diffEditor" class="container editor language-futil">
+            <!-- Logo -->
+            <div class="logo">
+            <a class="unstyled-link" href="https://calyxir.org">
+            <img class="main-logo" src="https://calyxir.org/img/logo-text.svg" alt="Calyx" />
+            </a>
+            <h3>
+            A Compiler Infrastructure for Accelerator Generators
+            </h3>
+            </div>
+            <!-- Examples -->
+            <div class="example">
+            <h2>Examples</h2>
+            <select id="examples-select"></select>
+            </div>
+            <!-- Pass Selector -->
+            <div class="passes">
+            <h2> Compiler Passes </h2>
+                <div id="passes"></div>
+                <div class="compile">
+                <button id="compile">Compile</button>
+                </div>
+            </div>
+            <!-- Input Editor -->
+            <div class="input-editor">
+              <pre id="input"
+                   contenteditable="true"
+                   spellcheck="false">
+                  <code></code>
+              </pre>
+            </div>
+            <!-- Output Editor -->
+            <div class="output-editor">
+              <pre id="output"
+                   contenteditable="false">
+                  <code></code>
+              </pre>
+            </div>
+            <!-- Footer -->
+            <div class="footer">
+              <hr/>
+              <div id="calyx-version"></div>
+            </div>
+        </div>
+    </body>
+</html>
