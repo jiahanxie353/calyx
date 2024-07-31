@@ -29,39 +29,43 @@ invocation of xclrun looks something like this::
 .. _pyxrt: https://github.com/Xilinx/XRT/blob/master/src/python/pybind11/src/pyxrt.cpp
 """
 import argparse
-import pynq
+import sys
+import pyxrt
 import numpy as np
 import simplejson as sjson
-import sys
 from typing import Mapping, Any, Dict
 from pathlib import Path
 from fud.stages.verilator.json_to_dat import parse_fp_widths, float_to_fixed
 from calyx.numeric_types import InvalidNumericType
+import ctypes
 
 
-def mem_to_buf(mem):
-    """Convert a fud-style JSON memory object to a PYNQ buffer."""
+def mem_to_buf(device, mem):
+    """Convert a fud-style JSON memory object to an XRT buffer."""
     ndarray = np.array(mem["data"], dtype=_dtype(mem["format"]))
-    buffer = pynq.allocate(ndarray.shape, dtype=ndarray.dtype)
-    buffer[:] = ndarray[:]
+    buffer = pyxrt.bo(device, ndarray.nbytes, pyxrt.bo.normal, mem_bank=0) # TODO: adjust mem_bank
+    buffer.write(ndarray.tobytes())
+    buffer.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_TO_DEVICE)
     return buffer
 
 
 def buf_to_mem(fmt, buf):
-    """Convert a PYNQ buffer to a fud-style JSON memory value."""
-    # converts int representation into fixed point
+    """Convert an XRT buffer to a fud-style JSON memory value."""
+    buf.sync(pyxrt.xclBOSyncDirection.XCL_BO_SYNC_BO_FROM_DEVICE)
+    data = np.frombuffer(buf.read(), dtype=_dtype(fmt))
+
+    # Converts int representation into fixed point
     if fmt["numeric_type"] == "fixed_point":
         width, int_width = parse_fp_widths(fmt)
         frac_width = width - int_width
 
         def convert_to_fp(value: float):
-            float_to_fixed(float(value), frac_width)
+            return float_to_fixed(float(value), frac_width)
 
-        convert_to_fp(buf)
-        return list(buf)
+        data = np.vectorize(convert_to_fp)(data)
+        return list(data)
     elif fmt["numeric_type"] in {"bitnum", "floating_point"}:
-        return [int(value) if isinstance(value, np.integer) else float(value) for value in buf]
-
+        return [int(value) if isinstance(value, np.integer) else float(value) for value in data]
     else:
         raise InvalidNumericType('Fud only supports "fixed_point", "bitnum", and "floating_point.')
 
@@ -75,36 +79,21 @@ def run(xclbin: Path, data: Mapping[str, Any]) -> Dict[str, Any]:
     Data file order must match the expected call signature in terms of order
     Also assume that the data Mapping values type are valid json-type equivalents
     """
+    device = pyxrt.device(0)
+    xclbin_path = str(xclbin.resolve(strict=True))
+    xclbin_obj = pyxrt.xclbin(xclbin_path)
+    uuid = device.load_xclbin(xclbin_obj)
+    kernel_name =  xclbin_obj.get_kernels()[0].get_name()
+    kernel = pyxrt.kernel(device, uuid, kernel_name)
+    
+    COUNT = 16
+    DATA_SIZE = ctypes.sizeof(ctypes.c_int32) * COUNT
+    boHandle = pyxrt.bo(device, DATA_SIZE, pyxrt.bo.normal, kernel.group_id(0))
+    # buffers = [pyxrt.bo(device, DATA_SIZE, pyxrt.bo.normal, kernel.group_id(0)) for mem in data.values()]
 
-    # Load the PYNQ overlay from the .xclbin file, raising a FileNotFoundError
-    # if the file does not exist.
-    ol = pynq.Overlay(str(xclbin.resolve(strict=True)))
-
-    # Send all the input data.
-    buffers = [mem_to_buf(mem) for mem in data.values()]
-    for buffer in buffers:
-        buffer.sync_to_device()
-
-    # Run the kernel.
-    kernel = getattr(ol, list(ol.ip_dict)[0])  # Like ol.Toplevel_1
-    # XXX(nathanielnrn) 2022-07-19: timeout is not currently used anywhere in
-    # generated verilog code, passed in because kernel.xml is generated to
-    # expect it as an argument
-    timeout = 1000
-    kernel.call(timeout, *buffers)
-
-    # Collect the output data.
-    for buf in buffers:
-        buf.sync_from_device()
-    mems = {
-        name: buf_to_mem(data[name]["format"], buf) for name, buf in zip(data, buffers)
-    }
-
-    # PYNQ recommends explicitly freeing its resources.
-    del buffers
-    ol.free()
-
-    return {"memories": mems}
+    for buf, mem in zip(buffers, data.values()):
+        breakpoint()
+        buf.write(mem)
 
 
 def _dtype(fmt) -> np.dtype:

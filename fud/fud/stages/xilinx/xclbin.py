@@ -70,7 +70,7 @@ class XilinxStage(Stage):
         package_cmd = (
             "cd {tmpdir} && "
             "mkdir -p xclbin && "
-            "/scratch/opt/Xilinx/Vivado/2020.2/bin/vivado "
+            "/scratch/opt/Xilinx2024/Vivado/2023.2/bin/vivado "
             "-mode batch "
             "-source gen_xo.tcl "
             "-tclargs xclbin/kernel.xo {port_names}"
@@ -93,7 +93,7 @@ class XilinxStage(Stage):
 
         xclbin_cmd = (
             "cd {tmpdir} && "
-            "/scratch/opt/Xilinx/Vitis/2020.2/bin/v++ -g "
+            "/scratch/opt/Xilinx2024/Vitis/2023.2/bin/v++ -g "
             "-t {mode} "
             "--platform {device} "
             "--save-temps "
