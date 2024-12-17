@@ -235,10 +235,10 @@ impl Backend for VerilogBackend {
             if cmd.status.success() {
                 // Post-process morty output
                 let stdout = String::from_utf8_lossy(&cmd.stdout);
-                let mut lines = stdout.lines();
+                let lines = stdout.lines();
                 let mut skip_next_line = false;
 
-                while let Some(line) = lines.next() {
+                for line in lines {
                     if skip_next_line {
                         skip_next_line = false;
                         continue;
