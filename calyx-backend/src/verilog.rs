@@ -8,13 +8,18 @@ use calyx_ir::{self as ir, Control, FlatGuard, Group, Guard, GuardRef, RRC};
 use calyx_utils::{CalyxResult, Error, OutputFile};
 use ir::Nothing;
 use itertools::Itertools;
-use serde_json::{Map, Value};
+use morty::{FileBundle, LibraryBundle};
+use regex::Regex;
+use std::collections::HashSet;
+use std::env;
+use std::fs;
 use std::fs::File;
 use std::io;
 use std::io::Write;
-use std::process::Command;
+use std::path::PathBuf;
+use std::process;
+use std::time::Instant;
 use std::{collections::HashMap, rc::Rc};
-use std::{fs::OpenOptions, time::Instant};
 use vast::v17::ast as v;
 
 /// Implements a simple Verilog backend. The backend only accepts Calyx programs with no control
@@ -94,83 +99,145 @@ fn validate_control(ctrl: &ir::Control) -> CalyxResult<()> {
     }
 }
 
-type DetectHandler = Box<dyn Fn(&ir::Context) -> bool>;
-type LibraryHandler =
-    Box<dyn Fn(&mut MortyConfig, &mut Vec<String>) -> CalyxResult<()>>;
+fn gen_include_dirs() -> Vec<String> {
+    let current_dir = env::current_dir().unwrap().to_str().unwrap().to_string();
 
-// Store the function handlers for the libraries we want to include, such as "HardFloat"
-struct LibraryConfig {
-    // Detect if a specific library is needed
-    detect_handler: DetectHandler,
-    // Function to modify MortyConfig to tweak its fields
-    library_handler: LibraryHandler,
+    let mut include_dirs = Vec::new();
+    include_dirs.push(format!(
+        "{}/primitives/float/HardFloat-1/source/",
+        current_dir
+    ));
+    // Randomly pick a (RISCV) directory to include specialization files
+    include_dirs.push(format!(
+        "{}/primitives/float/HardFloat-1/source/RISCV/",
+        current_dir
+    ));
+    include_dirs
 }
 
-impl LibraryConfig {
-    fn default() -> Self {
-        LibraryConfig {
-            detect_handler: Box::new(|_ctx| false),
-            library_handler: Box::new(|_config, _imported_files| Ok(())),
+fn gen_files() -> HashMap<String, PathBuf> {
+    // a hashmap from 'module name' to 'path' for all libraries.
+    let mut library_files = HashMap::new();
+    // a list of paths for all library files
+    let mut library_paths: Vec<PathBuf> = Vec::new();
+
+    // we first accumulate all library files from the 'library_dir' and 'library_file' options into
+    // a vector of paths, and then construct the library hashmap.
+    let library_dirs = gen_include_dirs(); // TODO: fix
+    for dir in library_dirs {
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| {
+            eprintln!("error accessing library directory `{}`: {}", dir, e);
+            process::exit(1)
+        }) {
+            let dir = entry.unwrap();
+            library_paths.push(dir.path());
         }
     }
+
+    for p in &library_paths {
+        // must have the library extension (.v or .sv).
+        if morty::has_libext(p) {
+            if let Some(m) = morty::lib_module(p) {
+                library_files.insert(m, p.to_owned());
+            }
+        }
+    }
+    library_files
 }
 
-/// Represents the json configuration for Morty, which requires three fields: "include_dirs", "defines", and "files". See https://github.com/pulp-platform/morty for usage.
-struct MortyConfig {
+fn gen_library_bundle(
     include_dirs: Vec<String>,
-    defines: HashMap<String, String>,
-    files: Vec<String>,
+    defines: HashMap<String, Option<String>>,
+    files: HashMap<String, PathBuf>,
+) -> LibraryBundle {
+    LibraryBundle {
+        include_dirs,
+        defines,
+        files,
+    }
 }
 
-impl MortyConfig {
-    fn default() -> Self {
-        MortyConfig {
-            defines: HashMap::new(),
-            include_dirs: Vec::new(),
-            files: Vec::new(),
+fn filter_files(files: Vec<String>) -> Vec<String> {
+    // Extract module names from a file
+    fn extract_modules(file_path: &str) -> HashSet<String> {
+        let mut modules = HashSet::new();
+        if let Ok(content) = fs::read_to_string(file_path) {
+            let re = Regex::new(r"\bmodule\s+(\w+)").unwrap();
+            for cap in re.captures_iter(&content) {
+                if let Some(module_name) = cap.get(1) {
+                    modules.insert(module_name.as_str().to_string());
+                }
+            }
+        }
+        modules
+    }
+
+    // Check if any of the given strings exist in the content of a file
+    fn any_string_in_file(
+        file_path: &str,
+        strings_to_search: &HashSet<String>,
+    ) -> bool {
+        if let Ok(content) = fs::read_to_string(file_path) {
+            for string in strings_to_search {
+                if content.contains(string) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // Filter out files that are not referenced by any other files within the HardFloat directory
+    let mut referenced_files = HashSet::new();
+    for file_path in &files {
+        if file_path.contains("float/HardFloat-1") {
+            let module_names = extract_modules(file_path);
+            for other_file in &files {
+                if file_path != other_file
+                    && any_string_in_file(other_file, &module_names)
+                {
+                    referenced_files.insert(file_path.clone());
+                    break;
+                }
+            }
+        } else {
+            referenced_files.insert(file_path.clone());
         }
     }
 
-    // Convert a Morty configuration into json format
-    fn to_json(&self) -> Value {
-        let mut json_map = Map::new();
-        // Convert `defines` from string to json Value type
-        let defines_json: Map<String, Value> = self
-            .defines
-            .iter()
-            .map(|(key, value)| (key.clone(), Value::String(value.clone())))
-            .collect();
-
-        json_map.insert("defines".to_string(), Value::Object(defines_json));
-        json_map.insert(
-            "include_dirs".to_string(),
-            Value::Array(
-                self.include_dirs
-                    .iter()
-                    .map(|d| Value::String(d.clone()))
-                    .collect(),
-            ),
-        );
-        json_map.insert(
-            "files".to_string(),
-            Value::Array(
-                self.files
-                    .iter()
-                    .map(|f| Value::String(f.clone()))
-                    .collect(),
-            ),
-        );
-        Value::Object(json_map)
-    }
+    // Update file_strings to only include referenced files
+    files
+        .into_iter()
+        .filter(|f| referenced_files.contains(f))
+        .collect()
 }
 
-// Collect all paths of the imported library files
-fn collect_imported_files(ctx: &ir::Context) -> Vec<String> {
-    ctx.lib
-        .extern_paths()
-        .into_iter()
-        .map(|pb| pb.to_string_lossy().into_owned())
-        .collect()
+fn gen_file_list(
+    library_bundle: &LibraryBundle,
+    ctx: &ir::Context,
+) -> Vec<FileBundle> {
+    fn collect_imported_files(ctx: &ir::Context) -> Vec<String> {
+        ctx.lib
+            .extern_paths()
+            .into_iter()
+            .map(|pb| pb.to_string_lossy().into_owned())
+            .collect()
+    }
+    let mut files = collect_imported_files(ctx);
+    for l_b in library_bundle.files.values() {
+        // TODO: if it's included
+        files.push(String::from(l_b.to_str().unwrap()));
+    }
+    let imported_files = filter_files(files);
+    // files.push(String::from("/scratch/jiahan/calyx/primitives/float/HardFloat-1/source/HardFloat_rawFN.v"));
+    // files.push(String::from("/scratch/jiahan/calyx/primitives/float/HardFloat-1/source/HardFloat_primitives.v"));
+    let include_dirs = gen_include_dirs();
+    vec![FileBundle {
+        include_dirs,
+        export_incdirs: HashMap::new(),
+        defines: HashMap::new(),
+        files: imported_files,
+    }]
 }
 
 impl Backend for VerilogBackend {
@@ -193,68 +260,34 @@ impl Backend for VerilogBackend {
         ctx: &ir::Context,
         file: &mut OutputFile,
     ) -> CalyxResult<()> {
-        // Declare all library configurations here
-        let libraries = vec![LibraryConfig::default()];
+        let include_dirs = gen_include_dirs();
+        let defines = HashMap::new();
+        let files = gen_files();
+        let library_bundle = gen_library_bundle(include_dirs, defines, files);
 
-        let mut all_imported_files: Vec<String> = collect_imported_files(ctx);
-
-        let mut morty_config = MortyConfig::default();
+        let file_list = gen_file_list(&library_bundle, ctx);
+        let syntax_trees =
+            morty::build_syntax_tree(&file_list, true, false, true, true)
+                .unwrap();
         // Check if any special library is needed and perform some pre-processing by invoking their corresponding handlers
-        let mut library_needed = false;
-        for lib in &libraries {
-            if (lib.detect_handler)(ctx) {
-                (lib.library_handler)(
-                    &mut morty_config,
-                    &mut all_imported_files,
-                )?;
-                library_needed = true;
-            }
-        }
+        let library_needed = true;
 
         let fw = &mut file.get_write();
         // If we needed a special library (like HardFloat), run Morty to pickle the files
         if library_needed {
-            let final_data = Value::Array(vec![morty_config.to_json()]);
-
-            let mut morty = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open("target/tmp/morty.json")?;
-
-            writeln!(morty, "{}", serde_json::to_string_pretty(&final_data)?)?;
-            morty.flush()?;
-
-            // Invoke Morty
-            let cmd = Command::new("morty")
-                .arg("-f")
-                .arg("target/tmp/morty.json")
-                .output()
-                .expect("failed to execute command");
-
-            if cmd.status.success() {
-                // Post-process morty output
-                let stdout = String::from_utf8_lossy(&cmd.stdout);
-                let lines = stdout.lines();
-                let mut skip_next_line = false;
-
-                for line in lines {
-                    if skip_next_line {
-                        skip_next_line = false;
-                        continue;
-                    }
-                    // Morty picked files contain comments like `// Compiled by morty` followed by specific timestamp information, making test cases tricky to compare. So we just remove this line and the following newline.
-                    if line.trim_start().starts_with("// Compiled by morty") {
-                        skip_next_line = true;
-                        continue;
-                    }
-
-                    println!("{}", line);
-                }
-            } else {
-                let stderr = String::from_utf8_lossy(&cmd.stderr);
-                eprint!("Error: {}", stderr);
-            }
+            let _pickle = morty::do_pickle(
+                None::<&String>,
+                None::<&String>,
+                HashSet::new(),
+                HashSet::new(),
+                library_bundle,
+                syntax_trees,
+                Box::new(io::stdout()), // TODO: print to output buffer
+                None,                   // top_module maybe needs to be changed
+                false,
+                false,
+                true,
+            );
         } else {
             // No special library detected, use original code of directly copying extern files.
             // If we don't do so, Morty will eliminate the body inside `ifndef-`endif. Also discussed in here: https://github.com/pulp-platform/morty/issues/49
